@@ -309,7 +309,17 @@ class EngineConfigCard(SettingCard):
             self.qwen3_segment_spin,
             vertical=True,
         ))
-        hint = QLabel("安装：pip install qwen-asr。该包依赖较重，不随本程序默认安装。")
+        self.qwen3_vad_check = QCheckBox()
+        lp.addWidget(_row(
+            "Silero 语音检测",
+            "过滤背景音乐和静音；需要 silero-vad，关闭时使用音量阈值",
+            self.qwen3_vad_check,
+            vertical=True,
+        ))
+        hint = QLabel(
+            "安装：pip install qwen-asr。启用 Silero 语音检测需要 silero-vad；"
+            "两者依赖较重，不随本程序默认安装。"
+        )
         hint.setStyleSheet("color: #b87b28; font-size: 11px;")
         hint.setWordWrap(True)
         lp.addWidget(hint)
@@ -663,6 +673,7 @@ class EngineConfigCard(SettingCard):
         self.qwen3_language_combo.setCurrentIndex(
             max(0, self.qwen3_language_combo.findData(asr.qwen3_asr_language)))
         self.qwen3_segment_spin.setValue(asr.qwen3_asr_segment_seconds)
+        self.qwen3_vad_check.setChecked(bool(getattr(asr, "qwen3_asr_vad_enabled", False)))
         self.fw_model_combo.setCurrentIndex(
             max(0, self.fw_model_combo.findData(asr.faster_whisper_model)))
         self.fw_device_combo.setCurrentIndex(
@@ -691,6 +702,7 @@ class EngineConfigCard(SettingCard):
         asr.qwen3_asr_quantization = self.qwen3_quant_combo.currentData()
         asr.qwen3_asr_language = self.qwen3_language_combo.currentData()
         asr.qwen3_asr_segment_seconds = self.qwen3_segment_spin.value()
+        asr.qwen3_asr_vad_enabled = self.qwen3_vad_check.isChecked()
         asr.faster_whisper_model = self.fw_model_combo.currentData()
         asr.faster_whisper_device = self.fw_device_combo.currentData()
         asr.faster_whisper_compute_type = self.fw_compute_combo.currentData()

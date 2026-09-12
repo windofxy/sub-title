@@ -101,6 +101,13 @@ class AsrConfig:
     qwen3_asr_stable_history_size: int = 3
     qwen3_asr_punctuation_confirmations: int = 2
     qwen3_asr_stable_prefix_min_chars: int = 4
+    qwen3_asr_vad_enabled: bool = False
+    qwen3_asr_vad_start_threshold: float = 0.60
+    qwen3_asr_vad_end_threshold: float = 0.30
+    qwen3_asr_vad_start_seconds: float = 0.20
+    qwen3_asr_vad_end_seconds: float = 0.50
+    qwen3_asr_vad_pre_roll_seconds: float = 0.25
+    qwen3_asr_vad_post_roll_seconds: float = 0.25
 
     # ---- 说话人区分（spk_id 输出）----
     # 开启后该 source（system / mic）的引擎必须为 funasr（其他引擎不支持流式 spk_id）。

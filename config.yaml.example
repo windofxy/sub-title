@@ -45,6 +45,13 @@ asr:
   qwen3_asr_stable_history_size: 3
   qwen3_asr_punctuation_confirmations: 2
   qwen3_asr_stable_prefix_min_chars: 4
+  qwen3_asr_vad_enabled: false
+  qwen3_asr_vad_start_threshold: 0.60
+  qwen3_asr_vad_end_threshold: 0.30
+  qwen3_asr_vad_start_seconds: 0.20
+  qwen3_asr_vad_end_seconds: 0.50
+  qwen3_asr_vad_pre_roll_seconds: 0.25
+  qwen3_asr_vad_post_roll_seconds: 0.25
   # ---- faster-whisper（兼容模式：静音/音乐暂停时可能产生幻觉字幕）----
   # 模型从 ModelScope 下载；旧的 large-v3-turbo 配置会自动改用 large-v3。
   faster_whisper_model: large-v3

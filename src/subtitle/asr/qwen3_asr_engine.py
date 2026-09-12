@@ -119,6 +119,22 @@ class Qwen3AsrEngine(AsrEngine):
         self._slow_inference_count = 0
         self._total_inference_seconds = 0.0
         self._max_inference_seconds = 0.0
+        self._vad_enabled = False
+        self._vad_model = None
+        self._vad_torch = None
+        self._vad_frame_samples = 512
+        self._vad_frame_buf = np.zeros(0, dtype=np.float32)
+        self._vad_context = np.zeros(0, dtype=np.float32)
+        self._vad_active = False
+        self._vad_speech_run = 0
+        self._vad_silence_run = 0
+        self._vad_start_threshold = 0.60
+        self._vad_end_threshold = 0.30
+        self._vad_start_samples = 3200
+        self._vad_end_samples = 8000
+        self._vad_pre_roll_samples = 4000
+        self._vad_post_roll_samples = 4000
+        self._vad_fallback_logged = False
         self._closed = False
 
     def load(self) -> None:
@@ -175,12 +191,14 @@ class Qwen3AsrEngine(AsrEngine):
         )
         if quantization == "4bit":
             _patch_qwen_audio_conv_dtype(self.model)
+        self._load_vad()
         logger.info(
-            "Qwen3-ASR ready (cadence=%.2fs, overlap=%.2fs, endpoint=%.2fs, max_window=%.2fs)",
+            "Qwen3-ASR ready (cadence=%.2fs, overlap=%.2fs, endpoint=%.2fs, max_window=%.2fs, vad=%s)",
             self._segment_samples / _SAMPLE_RATE,
             self._overlap_samples / _SAMPLE_RATE,
             self._endpoint_silence_samples / _SAMPLE_RATE,
             self._max_window_samples / _SAMPLE_RATE,
+            self._vad_model is not None,
         )
 
     def _configure_windowing(self, cadence_seconds: float) -> None:
@@ -218,12 +236,85 @@ class Qwen3AsrEngine(AsrEngine):
         self._stable_prefix_min_chars = max(
             1, int(getattr(self.cfg, "qwen3_asr_stable_prefix_min_chars", 4))
         )
+        self._vad_enabled = bool(getattr(self.cfg, "qwen3_asr_vad_enabled", False))
+        self._vad_start_threshold = min(
+            1.0, max(0.0, float(getattr(self.cfg, "qwen3_asr_vad_start_threshold", 0.60)))
+        )
+        self._vad_end_threshold = min(
+            self._vad_start_threshold,
+            max(0.0, float(getattr(self.cfg, "qwen3_asr_vad_end_threshold", 0.30))),
+        )
+        self._vad_start_samples = max(
+            self._vad_frame_samples,
+            int(max(0.0, float(getattr(self.cfg, "qwen3_asr_vad_start_seconds", 0.20))) * _SAMPLE_RATE),
+        )
+        self._vad_end_samples = max(
+            self._vad_frame_samples,
+            int(max(0.0, float(getattr(self.cfg, "qwen3_asr_vad_end_seconds", 0.50))) * _SAMPLE_RATE),
+        )
+        self._vad_pre_roll_samples = max(
+            self._vad_frame_samples,
+            int(max(0.0, float(getattr(self.cfg, "qwen3_asr_vad_pre_roll_seconds", 0.25))) * _SAMPLE_RATE),
+        )
+        self._vad_post_roll_samples = max(
+            self._vad_frame_samples,
+            int(max(0.0, float(getattr(self.cfg, "qwen3_asr_vad_post_roll_seconds", 0.25))) * _SAMPLE_RATE),
+        )
         self._hypotheses = deque(maxlen=self._stable_history_size)
+
+    def _load_vad(self) -> None:
+        self._vad_model = None
+        self._vad_torch = None
+        self._vad_fallback_logged = False
+        if not self._vad_enabled:
+            return
+        try:
+            import torch
+            from silero_vad import load_silero_vad
+
+            self._vad_torch = torch
+            self._vad_model = load_silero_vad(onnx=False)
+            eval_method = getattr(self._vad_model, "eval", None)
+            if callable(eval_method):
+                eval_method()
+            logger.info(
+                "Silero VAD enabled (start=%.2f, end=%.2f, end_silence=%.2fs)",
+                self._vad_start_threshold,
+                self._vad_end_threshold,
+                self._vad_end_samples / _SAMPLE_RATE,
+            )
+        except Exception as error:
+            self._vad_model = None
+            self._vad_torch = None
+            logger.warning(
+                "Silero VAD unavailable; falling back to RMS silence detection: %s",
+                error,
+            )
 
     def feed(self, chunk: np.ndarray) -> None:
         if self._closed or self.model is None:
             return
         chunk = chunk.astype(np.float32, copy=False)
+        if self._vad_model is not None:
+            try:
+                self._feed_vad(chunk)
+            except Exception as error:
+                self._vad_model = None
+                self._vad_torch = None
+                self._vad_frame_buf = np.zeros(0, dtype=np.float32)
+                if not self._vad_fallback_logged:
+                    logger.warning(
+                        "Silero VAD inference failed; falling back to RMS silence detection: %s",
+                        error,
+                    )
+                    self._vad_fallback_logged = True
+                self._reset_window()
+                self._feed_rms(chunk)
+            return
+
+        self._feed_rms(chunk)
+
+    def _feed_rms(self, chunk: np.ndarray) -> None:
         self._buf = np.concatenate([self._buf, chunk])
         self._samples_since_infer += len(chunk)
         energy = float(np.sqrt(np.mean(chunk ** 2))) if len(chunk) else 0.0
@@ -238,6 +329,70 @@ class Qwen3AsrEngine(AsrEngine):
         elif self._samples_since_infer >= self._segment_samples:
             self._samples_since_infer = 0
             self._infer_window()
+
+    def _feed_vad(self, chunk: np.ndarray) -> None:
+        self._vad_frame_buf = np.concatenate([self._vad_frame_buf, chunk])
+        while len(self._vad_frame_buf) >= self._vad_frame_samples:
+            frame = self._vad_frame_buf[: self._vad_frame_samples]
+            self._vad_frame_buf = self._vad_frame_buf[self._vad_frame_samples:]
+            context_limit = max(
+                self._vad_frame_samples,
+                self._vad_pre_roll_samples,
+                self._vad_start_samples,
+            )
+            self._vad_context = np.concatenate([self._vad_context, frame])[-context_limit:]
+            probability = self._vad_probability(frame)
+
+            if not self._vad_active:
+                if probability >= self._vad_start_threshold:
+                    self._vad_speech_run += len(frame)
+                else:
+                    self._vad_speech_run = 0
+                if self._vad_speech_run < self._vad_start_samples:
+                    continue
+                self._vad_active = True
+                self._buf = self._vad_context.copy()
+                self._speech_samples = len(self._buf)
+                self._samples_since_infer = 0
+                self._silence_run = 0
+                self._vad_silence_run = 0
+                continue
+
+            self._buf = np.concatenate([self._buf, frame])
+            self._speech_samples += len(frame)
+            self._samples_since_infer += len(frame)
+            if probability <= self._vad_end_threshold:
+                self._vad_silence_run += len(frame)
+            else:
+                self._vad_silence_run = 0
+
+            required_silence = max(self._vad_end_samples, self._vad_post_roll_samples)
+            if self._vad_silence_run >= required_silence:
+                self._vad_active = False
+                self._vad_speech_run = 0
+                self._vad_silence_run = 0
+                self._samples_since_infer = 0
+                if len(self._buf) > self._min_endpoint_samples:
+                    self._infer_window(finalize=True)
+                else:
+                    self._reset_window()
+            elif self._samples_since_infer >= self._segment_samples:
+                self._samples_since_infer = 0
+                self._infer_window()
+
+    def _vad_probability(self, frame: np.ndarray) -> float:
+        if self._vad_model is None or self._vad_torch is None:
+            return 0.0
+        audio = self._vad_torch.from_numpy(frame.copy())
+        inference_mode = getattr(self._vad_torch, "inference_mode", None)
+        context = inference_mode() if callable(inference_mode) else self._vad_torch.no_grad()
+        with context:
+            output = self._vad_model(audio, _SAMPLE_RATE)
+        reshape = getattr(output, "reshape", None)
+        if callable(reshape):
+            output = reshape(-1)[-1]
+        item = getattr(output, "item", None)
+        return float(item() if callable(item) else output)
 
     def _should_finalize_from_silence(self) -> bool:
         if self._speech_samples == 0 or len(self._buf) < self._min_endpoint_samples:
@@ -373,11 +528,26 @@ class Qwen3AsrEngine(AsrEngine):
         self._hypotheses.clear()
         self._committed_tail = ""
         self._last_partial = ""
+        self._vad_active = False
+        self._vad_speech_run = 0
+        self._vad_silence_run = 0
+        self._vad_context = np.zeros(0, dtype=np.float32)
+        reset_states = getattr(self._vad_model, "reset_states", None)
+        if callable(reset_states):
+            reset_states()
+
+    def _flush_vad_tail(self) -> None:
+        if self._vad_model is None or not self._vad_active or not len(self._vad_frame_buf):
+            return
+        self._buf = np.concatenate([self._buf, self._vad_frame_buf])
+        self._speech_samples += len(self._vad_frame_buf)
+        self._vad_frame_buf = np.zeros(0, dtype=np.float32)
 
     def stop(self) -> None:
         if self._closed:
             return
         self._closed = True
+        self._flush_vad_tail()
         if self.model is not None and len(self._buf) > 1600:
             self._infer_window(finalize=True)
         else:
@@ -393,4 +563,5 @@ class Qwen3AsrEngine(AsrEngine):
 
     def reset(self) -> None:
         self._reset_window()
+        self._vad_frame_buf = np.zeros(0, dtype=np.float32)
         self._closed = False
