@@ -17,6 +17,35 @@ def qwen3_asr_available() -> bool:
     return importlib.util.find_spec("qwen_asr") is not None
 
 
+def _patch_qwen_audio_conv_dtype(model) -> None:
+    """Keep Qwen3-ASR audio features compatible with the first audio conv."""
+    base_model = getattr(model, "model", None)
+    thinker = getattr(base_model, "thinker", None)
+    audio_tower = getattr(thinker, "audio_tower", None)
+    conv = getattr(audio_tower, "conv2d1", None)
+    register_hook = getattr(conv, "register_forward_pre_hook", None)
+    bias = getattr(conv, "bias", None)
+    target_dtype = getattr(bias, "dtype", None)
+    if target_dtype is None:
+        target_dtype = getattr(getattr(conv, "weight", None), "dtype", None)
+    if not callable(register_hook) or target_dtype is None:
+        logger.warning("Qwen3-ASR audio dtype adapter could not be installed")
+        return
+
+    def cast_audio_features(module, args):
+        if not args:
+            return args
+        audio_features = args[0]
+        to = getattr(audio_features, "to", None)
+        if not callable(to):
+            return args
+        return (to(dtype=getattr(module.bias, "dtype", target_dtype)), *args[1:])
+
+    handle = register_hook(cast_audio_features)
+    setattr(model, "_subtitle_qwen_audio_dtype_hook", handle)
+    logger.info("Enabled Qwen3-ASR audio convolution dtype adapter (%s)", target_dtype)
+
+
 class Qwen3AsrEngine(AsrEngine):
     def __init__(self, cfg, on_result: OnResult, source: str = "system"):
         super().__init__(cfg, on_result, source=source)
@@ -80,6 +109,8 @@ class Qwen3AsrEngine(AsrEngine):
         self.model = Qwen3ASRModel.from_pretrained(
             model_path, **model_kwargs,
         )
+        if quantization == "4bit":
+            _patch_qwen_audio_conv_dtype(self.model)
         logger.info(f"就绪，段时长={seconds}s")
 
     def feed(self, chunk: np.ndarray) -> None:
