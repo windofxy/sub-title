@@ -5,6 +5,7 @@ import importlib.util
 import logging
 import time
 from collections import deque
+from difflib import SequenceMatcher
 
 import numpy as np
 
@@ -17,6 +18,17 @@ logger = logging.getLogger(__name__)
 _SAMPLE_RATE = 16000
 _SENTENCE_END = frozenset("。！？!?；;")
 _COMMITTED_TAIL_CHARS = 256
+_PUNCTUATION_TRANSLATION = str.maketrans(
+    {
+        "，": ",",
+        "：": ":",
+        "；": ";",
+        "！": "!",
+        "？": "?",
+        "（": "(",
+        "）": ")",
+    }
+)
 
 
 def _clean_text(text: str) -> str:
@@ -26,17 +38,6 @@ def _clean_text(text: str) -> str:
 
 def _is_ascii_word_char(char: str) -> bool:
     return char.isascii() and char.isalnum()
-
-
-def _longest_common_prefix(texts: list[str]) -> str:
-    if not texts:
-        return ""
-    limit = min(len(text) for text in texts)
-    for index in range(limit):
-        char = texts[0][index]
-        if any(text[index] != char for text in texts[1:]):
-            return texts[0][:index]
-    return texts[0][:limit]
 
 
 def _trim_to_safe_boundary(text: str) -> str:
@@ -58,6 +59,59 @@ def _trim_to_safe_boundary(text: str) -> str:
     ):
         return value
     return ""
+
+
+def _first_sentence_prefix(text: str) -> str:
+    """Extract the first complete sentence from a hypothesis, if present."""
+    for index, char in enumerate(text):
+        if char in _SENTENCE_END:
+            return text[: index + 1].rstrip()
+    return ""
+
+
+def _normalize_sentence_for_match(text: str) -> str:
+    return "".join(text.split()).translate(_PUNCTUATION_TRANSLATION)
+
+
+def _sentences_are_similar(left: str, right: str) -> bool:
+    """Allow small ASR revisions without accepting a different sentence."""
+    left_normalized = _normalize_sentence_for_match(left)
+    right_normalized = _normalize_sentence_for_match(right)
+    if not left_normalized or not right_normalized:
+        return False
+    if len(left_normalized) < 8 or len(right_normalized) < 8:
+        return left_normalized == right_normalized
+    max_length = max(len(left_normalized), len(right_normalized))
+    max_length_delta = max(2, int(round(max_length * 0.08)))
+    if abs(len(left_normalized) - len(right_normalized)) > max_length_delta:
+        return False
+    return SequenceMatcher(
+        None, left_normalized, right_normalized, autojunk=False
+    ).ratio() >= 0.90
+
+
+def _fuzzy_prefix_length(latest: str, earlier: str, max_edits: int = 2) -> int:
+    """Find the latest prefix still supported after a few local revisions."""
+    accepted_end = 0
+    edits = 0
+    matcher = SequenceMatcher(None, latest, earlier, autojunk=False)
+    for tag, latest_start, latest_end, earlier_start, earlier_end in matcher.get_opcodes():
+        if tag == "equal":
+            accepted_end = latest_end
+            continue
+        # Text appended to either result is not part of a stable prefix yet.
+        if (
+            tag == "insert" and latest_start == len(latest)
+        ) or (
+            tag == "delete" and earlier_start == len(earlier)
+        ):
+            break
+        edit_size = max(latest_end - latest_start, earlier_end - earlier_start)
+        if edit_size == 0 or edits + edit_size > max_edits:
+            break
+        edits += edit_size
+        accepted_end = latest_end
+    return accepted_end
 
 
 def qwen3_asr_available() -> bool:
@@ -99,6 +153,8 @@ class Qwen3AsrEngine(AsrEngine):
         super().__init__(cfg, on_result, source=source)
         self.model = None
         self._buf = np.zeros(0, dtype=np.float32)
+        self._audio_base_sample = 0
+        self._committed_audio_sample = 0
         self._segment_samples = 32000
         self._overlap_samples = 6400
         self._endpoint_silence_samples = 8000
@@ -432,6 +488,10 @@ class Qwen3AsrEngine(AsrEngine):
 
             if text:
                 self._hypotheses.append(text)
+                sentence_prefix = self._stable_sentence_prefix()
+                if sentence_prefix:
+                    self._commit_prefix(sentence_prefix, text)
+                    return
                 if len(self._buf) >= self._max_window_samples:
                     stable_prefix = self._stable_prefix()
                     if stable_prefix:
@@ -469,10 +529,34 @@ class Qwen3AsrEngine(AsrEngine):
     def _stable_prefix(self) -> str:
         if len(self._hypotheses) < self._stable_history_size:
             return ""
-        prefix = _trim_to_safe_boundary(_longest_common_prefix(list(self._hypotheses)))
+        recent = list(self._hypotheses)
+        latest = recent[-1]
+        stable_length = len(latest)
+        for earlier in recent[:-1]:
+            stable_length = min(
+                stable_length, _fuzzy_prefix_length(latest, earlier)
+            )
+        prefix = _trim_to_safe_boundary(latest[:stable_length])
         if len(prefix) < self._stable_prefix_min_chars:
             return ""
         return prefix
+
+    def _stable_sentence_prefix(self) -> str:
+        """Return the latest sentence confirmed by fuzzy recent agreement."""
+        confirmations = max(2, self._punctuation_confirmations)
+        if len(self._hypotheses) < confirmations:
+            return ""
+        window_size = min(len(self._hypotheses), max(3, confirmations))
+        recent = list(self._hypotheses)[-window_size:]
+        latest = _first_sentence_prefix(recent[-1])
+        if not latest:
+            return ""
+        matching = sum(
+            1
+            for candidate in (_first_sentence_prefix(text) for text in recent)
+            if candidate and _sentences_are_similar(candidate, latest)
+        )
+        return latest if matching >= confirmations else ""
 
     def _remove_committed_overlap(self, text: str) -> str:
         if not text or not self._committed_tail:
@@ -505,16 +589,35 @@ class Qwen3AsrEngine(AsrEngine):
         self.on_result(text, is_final=True, source=self.source, spk_id=None)
         self._committed_tail = (self._committed_tail + text)[-_COMMITTED_TAIL_CHARS:]
 
-    def _roll_window(self, stable_prefix: str, hypothesis: str) -> None:
+    def _commit_prefix(self, stable_prefix: str, hypothesis: str) -> None:
+        """Commit a stable sentence while retaining overlap for the next decode."""
         self._emit_final(stable_prefix)
         suffix = hypothesis[len(stable_prefix):].lstrip()
-        stable_fraction = min(1.0, len(stable_prefix) / max(1, len(hypothesis)))
+        self._retain_audio_after_prefix(stable_prefix, hypothesis)
+        self._hypotheses.clear()
+        self._last_partial = ""
+        if suffix:
+            self._emit_partial(suffix)
+
+    def _retain_audio_after_prefix(self, prefix: str, hypothesis: str) -> None:
+        """Drop committed audio approximately and keep a boundary overlap."""
+        if not len(self._buf):
+            return
+        stable_fraction = min(1.0, len(prefix) / max(1, len(hypothesis)))
         estimated_boundary = int(len(self._buf) * stable_fraction)
         keep_from = max(0, estimated_boundary - self._overlap_samples)
+        old_base_sample = self._audio_base_sample
+        self._committed_audio_sample = old_base_sample + estimated_boundary
+        self._audio_base_sample = old_base_sample + keep_from
         self._buf = self._buf[keep_from:].copy()
         self._silence_run = 0
         self._speech_samples = len(self._buf)
         self._samples_since_infer = 0
+
+    def _roll_window(self, stable_prefix: str, hypothesis: str) -> None:
+        self._emit_final(stable_prefix)
+        suffix = hypothesis[len(stable_prefix):].lstrip()
+        self._retain_audio_after_prefix(stable_prefix, hypothesis)
         self._hypotheses.clear()
         self._last_partial = ""
         if suffix:
@@ -522,6 +625,8 @@ class Qwen3AsrEngine(AsrEngine):
 
     def _reset_window(self) -> None:
         self._buf = np.zeros(0, dtype=np.float32)
+        self._audio_base_sample = 0
+        self._committed_audio_sample = 0
         self._silence_run = 0
         self._speech_samples = 0
         self._samples_since_infer = 0
