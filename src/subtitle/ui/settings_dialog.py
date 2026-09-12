@@ -303,7 +303,12 @@ class EngineConfigCard(SettingCard):
             self.qwen3_language_combo.addItem(label, value)
         lp.addWidget(_row("语言", "自动检测支持多语种和方言", self.qwen3_language_combo, vertical=True))
         self.qwen3_segment_spin = self._segment_spin()
-        lp.addWidget(_row("攒段时长", "当前内置段式模式；vLLM 原生流式将后续接入", self.qwen3_segment_spin, vertical=True))
+        lp.addWidget(_row(
+            "识别刷新间隔",
+            "按此间隔刷新临时字幕；连续静音后才定稿",
+            self.qwen3_segment_spin,
+            vertical=True,
+        ))
         hint = QLabel("安装：pip install qwen-asr。该包依赖较重，不随本程序默认安装。")
         hint.setStyleSheet("color: #b87b28; font-size: 11px;")
         hint.setWordWrap(True)

@@ -18,6 +18,36 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def _enqueue_audio_block(capture, block: np.ndarray, source: str) -> None:
+    capture.total_blocks += 1
+    try:
+        capture.queue.put(block, timeout=1)
+    except queue.Full:
+        capture.dropped_blocks += 1
+        if capture.dropped_blocks == 1 or capture.dropped_blocks % 10 == 0:
+            logger.warning(
+                "%s audio queue full: dropped=%d, captured=%d, queue=%d/%d",
+                source,
+                capture.dropped_blocks,
+                capture.total_blocks,
+                capture.queue.qsize(),
+                capture.queue.maxsize,
+            )
+    capture.peak_queue_size = max(capture.peak_queue_size, capture.queue.qsize())
+
+
+def _log_capture_summary(capture, source: str) -> None:
+    logger.info(
+        "%s audio capture summary: captured=%d, dropped=%d, peak_queue=%d/%d",
+        source,
+        capture.total_blocks,
+        capture.dropped_blocks,
+        capture.peak_queue_size,
+        capture.queue.maxsize,
+    )
+
+
 # 注意：soundcard 的 mediafoundation 后端在 import 时会调 CoInitialize/CoInitializeEx
 # 初始化当前线程的 COM（_com = _COMLibrary() 是模块级全局）。
 # 如果在主线程（QApplication 所在）import，会导致 PySide6 的 OleInitialize 冲突
@@ -149,6 +179,9 @@ class SystemAudioCapture(threading.Thread):
         self._mic = None
         self.actual_sr: Optional[int] = None
         self.error: Optional[str] = None
+        self.total_blocks = 0
+        self.dropped_blocks = 0
+        self.peak_queue_size = 0
 
     def run(self):
         try:
@@ -156,6 +189,8 @@ class SystemAudioCapture(threading.Thread):
         except Exception as e:
             self.error = str(e)
             logger.exception(f"异常: {e}")
+        finally:
+            _log_capture_summary(self, "system")
 
     def stop(self):
         self._stop.set()
@@ -189,10 +224,7 @@ class SystemAudioCapture(threading.Thread):
                     continue
                 # data: (frames, 1) float32 → (frames,)
                 mono = np.asarray(data, dtype=np.float32).reshape(-1)
-                try:
-                    self.queue.put(mono, timeout=1)
-                except queue.Full:
-                    pass  # 推理跟不上时丢块，保证实时性
+                _enqueue_audio_block(self, mono, "system")
         logger.info("录音流已关闭")
 
 
@@ -226,6 +258,9 @@ class MicrophoneCapture(threading.Thread):
         self._mic = None
         self.actual_sr: Optional[int] = None
         self.error: Optional[str] = None
+        self.total_blocks = 0
+        self.dropped_blocks = 0
+        self.peak_queue_size = 0
 
     def run(self):
         try:
@@ -233,6 +268,8 @@ class MicrophoneCapture(threading.Thread):
         except Exception as e:
             self.error = str(e)
             logger.exception(f"异常: {e}")
+        finally:
+            _log_capture_summary(self, "microphone")
 
     def stop(self):
         self._stop.set()
@@ -262,8 +299,5 @@ class MicrophoneCapture(threading.Thread):
                     time.sleep(0.05)
                     continue
                 mono = np.asarray(data, dtype=np.float32).reshape(-1)
-                try:
-                    self.queue.put(mono, timeout=1)
-                except queue.Full:
-                    pass
+                _enqueue_audio_block(self, mono, "microphone")
         logger.info("录音流已关闭")

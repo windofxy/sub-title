@@ -6,7 +6,11 @@ import numpy as np
 
 from subtitle.asr.faster_whisper_engine import FasterWhisperEngine
 from subtitle.asr.funasr_nano_engine import FunAsrNanoEngine
-from subtitle.asr.qwen3_asr_engine import Qwen3AsrEngine
+from subtitle.asr.qwen3_asr_engine import (
+    Qwen3AsrEngine,
+    _longest_common_prefix,
+    _trim_to_safe_boundary,
+)
 from subtitle.asr.sensevoice_engine import _strip_tags
 
 
@@ -40,6 +44,14 @@ class FakeQwenModel:
 
 
 class SegmentedAsrTests(unittest.TestCase):
+    def test_qwen3_stable_prefix_uses_last_complete_sentence(self):
+        common = _longest_common_prefix([
+            "第一句。第二句开",
+            "第一句。第二句开始",
+            "第一句。第二句开始了",
+        ])
+        self.assertEqual(_trim_to_safe_boundary(common), "第一句。")
+
     def test_qwen3_loads_from_modelscope_local_snapshot(self):
         loaded_paths = []
         qwen_model = MagicMock()
@@ -155,11 +167,38 @@ class SegmentedAsrTests(unittest.TestCase):
 
     def test_qwen3_asr_emits_segment_text(self):
         received = []
-        engine = Qwen3AsrEngine(object(), lambda text, *args, **kwargs: received.append(text))
+        engine = Qwen3AsrEngine(
+            object(),
+            lambda text, is_final, *args, **kwargs: received.append((text, is_final)),
+        )
         engine.model = FakeQwenModel()
         engine._segment_samples = 1600
         engine.feed(np.full(1600, 0.02, dtype=np.float32))
-        self.assertEqual(received, ["新模型字幕"])
+        self.assertEqual(received, [("新模型字幕", False)])
+
+    def test_qwen3_asr_discards_a_silent_window(self):
+        engine = Qwen3AsrEngine(object(), lambda *args, **kwargs: None)
+        engine.model = FakeQwenModel()
+        engine._segment_samples = 1600
+        engine.feed(np.zeros(1600, dtype=np.float32))
+        self.assertEqual(len(engine._buf), 0)
+
+    def test_qwen3_asr_finalizes_after_silence(self):
+        received = []
+        engine = Qwen3AsrEngine(
+            object(),
+            lambda text, is_final, *args, **kwargs: received.append((text, is_final)),
+        )
+        engine.model = FakeQwenModel()
+        engine._segment_samples = 1600
+        engine._min_endpoint_samples = 1600
+        engine._endpoint_silence_samples = 800
+        engine.feed(np.full(1600, 0.02, dtype=np.float32))
+        engine.feed(np.zeros(800, dtype=np.float32))
+        self.assertEqual(
+            received,
+            [("新模型字幕", False), ("新模型字幕", True)],
+        )
 
 
 if __name__ == "__main__":

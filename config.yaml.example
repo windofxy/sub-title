@@ -38,6 +38,13 @@ asr:
   qwen3_asr_quantization: none # none / 4bit（CUDA + bitsandbytes，非 GGUF）
   qwen3_asr_language: Chinese
   qwen3_asr_segment_seconds: 2.0
+  qwen3_asr_overlap_seconds: 0.4
+  qwen3_asr_endpoint_silence_seconds: 0.5
+  qwen3_asr_punctuation_silence_seconds: 0.3
+  qwen3_asr_max_window_seconds: 6.0
+  qwen3_asr_stable_history_size: 3
+  qwen3_asr_punctuation_confirmations: 2
+  qwen3_asr_stable_prefix_min_chars: 4
   # ---- faster-whisper（兼容模式：静音/音乐暂停时可能产生幻觉字幕）----
   # 模型从 ModelScope 下载；旧的 large-v3-turbo 配置会自动改用 large-v3。
   faster_whisper_model: large-v3

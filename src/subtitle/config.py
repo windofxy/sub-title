@@ -93,7 +93,14 @@ class AsrConfig:
     # "none" = 原始权重；"4bit" = CUDA 上使用 bitsandbytes 运行时量化。
     qwen3_asr_quantization: str = "none"
     qwen3_asr_language: str = "Chinese"
-    qwen3_asr_segment_seconds: float = 2.0
+    qwen3_asr_segment_seconds: float = 2.0  # Partial-result cadence, not a sentence boundary.
+    qwen3_asr_overlap_seconds: float = 0.4
+    qwen3_asr_endpoint_silence_seconds: float = 0.5
+    qwen3_asr_punctuation_silence_seconds: float = 0.3
+    qwen3_asr_max_window_seconds: float = 6.0
+    qwen3_asr_stable_history_size: int = 3
+    qwen3_asr_punctuation_confirmations: int = 2
+    qwen3_asr_stable_prefix_min_chars: int = 4
 
     # ---- 说话人区分（spk_id 输出）----
     # 开启后该 source（system / mic）的引擎必须为 funasr（其他引擎不支持流式 spk_id）。
