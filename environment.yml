@@ -9,6 +9,9 @@ dependencies:
       # 这里不放 torch，避免 pip 装成 CPU 版。
       - funasr==1.3.29
       - silero-vad>=5.1.2
+      - transformers>=4.51.0
+      - sentencepiece>=0.2.0
+      - safetensors>=0.4.3
       - soundcard
       - soundfile
       - numpy

@@ -50,6 +50,12 @@ silero-vad>=5.1.2
 # 未装时引擎选项里 faster_whisper 会置灰提示，不影响其他引擎。
 faster-whisper>=1.2.0
 
+# 内置 NLLB-200 翻译引擎（可选；选择 nllb_local 时需要）：
+# transformers/sentencepiece/safetensors 与 torch 一起使用，模型首次从 ModelScope 下载。
+transformers>=4.51.0
+sentencepiece>=0.2.0
+safetensors>=0.4.3
+
 # Qwen3-ASR（可选：新一代多语种/歌曲模型，依赖较重，按需安装）：
 #   pip install qwen-asr
 

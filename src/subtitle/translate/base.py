@@ -24,6 +24,9 @@ class Translator:
     调用方（TranslationWorker）负责把调用放到后台线程池，结果用 Qt 信号回主线程。
     """
 
+    # Local seq2seq models can be GPU-bound and must preserve subtitle order.
+    serial = False
+
     def __init__(self, cfg, source_lang: str = "auto", target_lang: str = "zh-Hans"):
         self.cfg = cfg
         self.source_lang = source_lang   # "auto" = 自动检测（Azure 支持，本地引擎需具体码）

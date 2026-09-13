@@ -3,7 +3,7 @@
 与 asr/factory.py 同构：按字符串分发、延迟 import、缺失依赖给友好提示。
 新增引擎在这里注册即可，worker/app 不用改。
 
-engine 取值：azure / google / libretranslate / nllb / none
+engine 取值：azure / google / libretranslate / nllb / nllb_local / none
 none（或 enabled=False）→ 返回 None，上层据此跳过翻译（零行为回归）。
 """
 from __future__ import annotations
@@ -52,5 +52,12 @@ def create_translator(cfg) -> Optional[Translator]:
         from .nllb_engine import NllbTranslator
         return NllbTranslator(tcfg, source_lang, target_lang)
 
-    logger.warning("未知翻译引擎: %s（支持: azure/google/libretranslate/nllb）", engine)
+    if engine == "nllb_local":
+        from .nllb_local_engine import NllbLocalTranslator
+        return NllbLocalTranslator(tcfg, source_lang, target_lang)
+
+    logger.warning(
+        "未知翻译引擎: %s（支持: azure/google/libretranslate/nllb/nllb_local）",
+        engine,
+    )
     return None

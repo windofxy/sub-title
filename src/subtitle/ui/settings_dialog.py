@@ -1575,7 +1575,8 @@ class SettingsDialog(QDialog):
         self.trans_engine_combo.addItem("微软 Azure（推荐，官方免费层）", "azure")
         self.trans_engine_combo.addItem("谷歌 Google（免 key，易限流）", "google")
         self.trans_engine_combo.addItem("本地 LibreTranslate（离线）", "libretranslate")
-        self.trans_engine_combo.addItem("本地 NLLB-200（离线，质量最高）", "nllb")
+        self.trans_engine_combo.addItem("NLLB-200 服务（需单独启动）", "nllb")
+        self.trans_engine_combo.addItem("NLLB-200 内置模型（可选依赖）", "nllb_local")
         self.trans_engine_combo.currentIndexChanged.connect(self._on_trans_engine_changed)
         g_main.add_card(_row("翻译引擎", "选择翻译服务来源", self.trans_engine_combo))
         v.addWidget(g_main)
@@ -1599,7 +1600,7 @@ class SettingsDialog(QDialog):
         g_lang.add_card(_row("目标语言", "译文语种", self.trans_tgt_combo))
         v.addWidget(g_lang)
 
-        # 引擎参数（按当前引擎显示对应卡片：Azure 凭证 / 本地服务地址）
+        # 引擎参数（按当前引擎显示对应卡片）
         self.trans_param_stack = QStackedWidget()
         # 索引 0：Azure 凭证
         self.trans_param_stack.addWidget(self._build_trans_azure_card())
@@ -1616,7 +1617,23 @@ class SettingsDialog(QDialog):
         google_hint.setWordWrap(True)
         g_google.add_card(_row("说明", "", google_hint, vertical=True))
         self.trans_param_stack.addWidget(g_google)
+        # 索引 3：内置 NLLB-200 模型
+        self.trans_param_stack.addWidget(self._build_trans_nllb_local_card())
         v.addWidget(self.trans_param_stack)
+
+        # 所有翻译引擎共用测试按钮；本地 NLLB 的模型加载在后台测试线程执行。
+        g_test = SettingCardGroup("翻译测试")
+        test_row = QWidget()
+        tr = QHBoxLayout(test_row)
+        tr.setContentsMargins(0, 0, 0, 0)
+        self.trans_test_btn = QPushButton("🔍 测试翻译")
+        self.trans_test_btn.clicked.connect(self._on_trans_test)
+        self.trans_test_status = QLabel("")
+        self.trans_test_status.setStyleSheet("color: #888; font-size: 11px;")
+        tr.addWidget(self.trans_test_btn)
+        tr.addWidget(self.trans_test_status, 1)
+        g_test.add_card(_row("测试", "按当前引擎和语言设置翻译一条短句", test_row))
+        v.addWidget(g_test)
 
         # 译文样式
         g_style = SettingCardGroup("译文样式")
@@ -1656,17 +1673,6 @@ class SettingsDialog(QDialog):
         self.trans_azure_region_edit = QLineEdit()
         self.trans_azure_region_edit.setPlaceholderText("如 eastus / southeastasia")
         g.add_card(_row("Region", "Ocp-Apim-Subscription-Region", self.trans_azure_region_edit))
-        # 测试连接按钮
-        test_row = QWidget()
-        tr = QHBoxLayout(test_row)
-        tr.setContentsMargins(0, 0, 0, 0)
-        self.trans_test_btn = QPushButton("🔍 测试连接")
-        self.trans_test_btn.clicked.connect(self._on_trans_test)
-        self.trans_test_status = QLabel("")
-        self.trans_test_status.setStyleSheet("color: #888; font-size: 11px;")
-        tr.addWidget(self.trans_test_btn)
-        tr.addWidget(self.trans_test_status, 1)
-        g.add_card(_row("测试", "用当前配置探测翻译服务连通性", test_row))
         return g
 
     def _build_trans_local_card(self) -> QWidget:
@@ -1702,13 +1708,64 @@ class SettingsDialog(QDialog):
         g.add_card(_row("NLLB-200", "host : port", nllb_row))
         return g
 
+    def _build_trans_nllb_local_card(self) -> QWidget:
+        """内置 NLLB-200 模型参数卡片。"""
+        g = SettingCardGroup("内置 NLLB-200")
+        hint = QLabel(
+            "首次测试或开始识别时从 ModelScope 下载并加载模型，可能需要数 GB 内存/显存。\n"
+            "内置 NLLB 不支持自动检测源语言，请在上方选择具体源语言。"
+        )
+        hint.setStyleSheet("color: #888; font-size: 11px;")
+        hint.setWordWrap(True)
+        g.add_card(_row("说明", "", hint, vertical=True))
+
+        self.trans_nllb_local_model_edit = QLineEdit(
+            "facebook/nllb-200-distilled-600M"
+        )
+        g.add_card(_row(
+            "模型 ID", "ModelScope 模型 ID", self.trans_nllb_local_model_edit,
+        ))
+
+        self.trans_nllb_local_device_combo = QComboBox()
+        for label, code in (
+            ("自动（优先 CUDA）", "auto"),
+            ("CUDA", "cuda"),
+            ("CPU", "cpu"),
+            ("MPS", "mps"),
+        ):
+            self.trans_nllb_local_device_combo.addItem(label, code)
+        g.add_card(_row("推理设备", "自动模式会在 CUDA 不可用时降级", self.trans_nllb_local_device_combo))
+
+        self.trans_nllb_local_dtype_combo = QComboBox()
+        for label, code in (
+            ("自动", "auto"),
+            ("Float16", "float16"),
+            ("BFloat16", "bfloat16"),
+            ("Float32", "float32"),
+        ):
+            self.trans_nllb_local_dtype_combo.addItem(label, code)
+        g.add_card(_row("模型精度", "CPU 上 Float16 会自动回退到 Float32", self.trans_nllb_local_dtype_combo))
+
+        self.trans_nllb_local_beams_spin = QSpinBox()
+        self.trans_nllb_local_beams_spin.setRange(1, 8)
+        self.trans_nllb_local_beams_spin.setValue(2)
+        g.add_card(_row("Beam size", "越大通常越慢", self.trans_nllb_local_beams_spin))
+
+        self.trans_nllb_local_max_tokens_spin = QSpinBox()
+        self.trans_nllb_local_max_tokens_spin.setRange(16, 512)
+        self.trans_nllb_local_max_tokens_spin.setValue(128)
+        g.add_card(_row("最大输出 token", "过长句子会增加延迟", self.trans_nllb_local_max_tokens_spin))
+        return g
+
     def _on_trans_engine_changed(self) -> None:
-        """引擎切换：显示对应的参数卡片（Azure 凭证 / 本地服务 / Google 说明）。"""
+        """引擎切换：显示对应的参数卡片。"""
         eng = self.trans_engine_combo.currentData()
         if eng == "azure":
             self.trans_param_stack.setCurrentIndex(0)
         elif eng in ("libretranslate", "nllb"):
             self.trans_param_stack.setCurrentIndex(1)
+        elif eng == "nllb_local":
+            self.trans_param_stack.setCurrentIndex(3)
         else:   # google
             self.trans_param_stack.setCurrentIndex(2)
 
@@ -1731,6 +1788,7 @@ class SettingsDialog(QDialog):
         self.trans_test_status.setText("测试中……")
 
         def _run():
+            tr = None
             try:
                 tr = create_translator(cfg)
                 if tr is None:
@@ -1741,6 +1799,9 @@ class SettingsDialog(QDialog):
                 return False, str(e)
             except Exception as e:
                 return False, f"异常：{e}"
+            finally:
+                if tr is not None:
+                    tr.close()
 
         from PySide6.QtCore import QThread
         worker = _TranslationTestWorker(_run)
@@ -1767,6 +1828,14 @@ class SettingsDialog(QDialog):
         tcfg.libretranslate_port = self.trans_lt_port_spin.value()
         tcfg.nllb_host = self.trans_nllb_host_edit.text().strip() or "localhost"
         tcfg.nllb_port = self.trans_nllb_port_spin.value()
+        tcfg.nllb_local_model = (
+            self.trans_nllb_local_model_edit.text().strip()
+            or "facebook/nllb-200-distilled-600M"
+        )
+        tcfg.nllb_local_device = self.trans_nllb_local_device_combo.currentData()
+        tcfg.nllb_local_dtype = self.trans_nllb_local_dtype_combo.currentData()
+        tcfg.nllb_local_max_new_tokens = self.trans_nllb_local_max_tokens_spin.value()
+        tcfg.nllb_local_num_beams = self.trans_nllb_local_beams_spin.value()
 
     # ---------- 标签页：皮肤 ----------
     def _build_skin_tab(self) -> QWidget:
@@ -1875,6 +1944,21 @@ class SettingsDialog(QDialog):
         self.trans_lt_port_spin.setValue(int(tr.libretranslate_port or 5000))
         self.trans_nllb_host_edit.setText(tr.nllb_host or "localhost")
         self.trans_nllb_port_spin.setValue(int(tr.nllb_port or 6060))
+        self.trans_nllb_local_model_edit.setText(
+            tr.nllb_local_model or "facebook/nllb-200-distilled-600M"
+        )
+        idx = self.trans_nllb_local_device_combo.findData(
+            tr.nllb_local_device or "auto"
+        )
+        self.trans_nllb_local_device_combo.setCurrentIndex(max(0, idx))
+        idx = self.trans_nllb_local_dtype_combo.findData(
+            tr.nllb_local_dtype or "auto"
+        )
+        self.trans_nllb_local_dtype_combo.setCurrentIndex(max(0, idx))
+        self.trans_nllb_local_max_tokens_spin.setValue(
+            int(tr.nllb_local_max_new_tokens or 128)
+        )
+        self.trans_nllb_local_beams_spin.setValue(int(tr.nllb_local_num_beams or 2))
         # 译文样式
         self.trans_scale_spin.setValue(float(tr.translation_font_scale or 0.85))
         self.trans_color_btn.set_color(tr.translation_color or "#cccccc")

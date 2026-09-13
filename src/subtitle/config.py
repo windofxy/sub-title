@@ -208,20 +208,27 @@ class TranslationConfig:
     与原文各行出字、互不干扰（翻译不阻塞 ASR）。关闭（enabled=False）= 单行原状，零回归。
 
     引擎选择：azure（主力，官方免费层 F0）/ google（免 key 备选，易限流）/
-              libretranslate / nllb（本地离线，复用 WSL 起服务模式）。
+              libretranslate / nllb（远程本地服务）/ nllb_local（内置模型）。
     Azure 凭证（key/region）不在此 —— 由 credentials 模块存系统 keyring，
     与阿里云凭证同等安全。
     """
     enabled: bool = False                    # 总开关（关=单行原状）
-    engine: str = "azure"                    # azure/google/libretranslate/nllb
+    engine: str = "azure"                    # azure/google/libretranslate/nllb/nllb_local
     source_lang: str = "auto"                # auto=自动检测（Azure 支持；本地引擎需具体码）
     target_lang: str = "zh-Hans"             # 目标语言
     translate_final_only: bool = True        # 只翻定稿句（避免 partial 频繁重译）
-    # ---- 本地服务地址（LibreTranslate / NLLB）----
+    # ---- 本地服务地址（LibreTranslate / 远程 NLLB）----
     libretranslate_host: str = "localhost"
     libretranslate_port: int = 5000
     nllb_host: str = "localhost"
     nllb_port: int = 6060
+    # ---- 内置 NLLB-200（可选 Transformers 模型）----
+    nllb_local_model: str = "facebook/nllb-200-distilled-600M"
+    nllb_local_device: str = "auto"             # auto / cpu / cuda / mps
+    nllb_local_dtype: str = "auto"              # auto / float32 / float16 / bfloat16
+    nllb_local_max_source_tokens: int = 512
+    nllb_local_max_new_tokens: int = 128
+    nllb_local_num_beams: int = 2
     # ---- 译文样式 ----
     translation_font_scale: float = 0.85     # 译文字号 = 原文字号 * 此值
     translation_color: str = ""              # 空=跟随主题文本色；否则用此 hex 色

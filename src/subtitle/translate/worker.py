@@ -2,7 +2,7 @@
 
 线程模型（与 pipeline 对称）：
   - feed(text, source)：主线程调，入队定稿句（去重）
-  - 内部 ThreadPoolExecutor(max_workers=2) 并发翻译（Azure 无并发限制；本地引擎按算力）
+  - 内部 ThreadPoolExecutor 执行翻译（本地模型可声明串行以保持字幕顺序）
   - 翻译完成 emit translation_done(orig, trans, source) —— Qt QueuedConnection 送主线程
   - start()/stop() 与识别同步生命周期
 
@@ -60,7 +60,10 @@ class TranslationWorker(QObject):
             # enabled=False 或 engine=none
             return False
         self._translator = translator
-        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="translate")
+        workers = 1 if getattr(translator, "serial", False) else 2
+        self._executor = ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="translate"
+        )
         self._running.set()
         self._consecutive_errors = 0
         return True
@@ -123,9 +126,12 @@ class TranslationWorker(QObject):
         self._running.clear()
         ex = self._executor
         self._executor = None
-        if ex is not None:
-            ex.shutdown(wait=False, cancel_futures=True)
         tr = self._translator
+        if ex is not None:
+            ex.shutdown(
+                wait=bool(getattr(tr, "serial", False)),
+                cancel_futures=True,
+            )
         self._translator = None
         if tr is not None:
             try:

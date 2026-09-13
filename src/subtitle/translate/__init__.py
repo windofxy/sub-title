@@ -1,6 +1,6 @@
 """翻译子系统 —— 与 asr/ 子包对称的引擎化翻译。
 
-四个引擎（Azure/Google/LibreTranslate/NLLB-200）经 factory 按 config 创建，
+五个引擎（Azure/Google/LibreTranslate/远程 NLLB-200/内置 NLLB-200）经 factory 按 config 创建，
 由 TranslationWorker 在后台线程池并发翻译 ASR 定稿句，结果通过 Qt 信号回主线程。
 
 公开 API：
